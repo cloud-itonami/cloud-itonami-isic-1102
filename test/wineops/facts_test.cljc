@@ -177,3 +177,71 @@
   (testing "vintage percent below minimum fails"
     (let [p (facts/product-type-by-id :wine/still-table)]
       (is (false? (facts/vintage-percent-meets-minimum? 70 p))))))
+
+;; ───────── Verified US CFR figures (2026-07-25) ─────────
+
+(deftest us-limits-all-carry-a-fetched-source
+  (is (true? (facts/us-limits-cited?)))
+  (doseq [[k v] facts/us-regulatory-limits]
+    (is (re-find #"^27 CFR " (:section v)) (str k " must name its CFR section"))
+    (is (re-find #"govinfo\.gov" (:provenance v)) (str k " must cite official CFR XML"))))
+
+(deftest abv-tolerance-boundary-is-not-inclusive-of-14
+  (testing "4.36(b): MORE THAN 14% gets 1.0; 14% OR LESS gets 1.5"
+    (is (= 1.5 (facts/abv-tolerance-percent 14.0))
+        "exactly 14.0 falls in the 'or less' band -- the docstring had this backwards")
+    (is (= 1.5 (facts/abv-tolerance-percent 13.9)))
+    (is (= 1.0 (facts/abv-tolerance-percent 14.1)))
+    (is (nil? (facts/abv-tolerance-percent nil)))))
+
+(deftest volatile-acidity-figures-match-27-cfr-4-21
+  (testing "0.14 g/100mL red = 1.4 g/L; 0.12 = 1.2 g/L -- not the 1.2/1.1 claimed before"
+    (is (= 1.4 (facts/volatile-acidity-ceiling-g-per-l :red)))
+    (is (= 1.2 (facts/volatile-acidity-ceiling-g-per-l :other))))
+  (testing "unameliorated 28+ Brix allowance"
+    (is (= 1.7 (facts/volatile-acidity-ceiling-g-per-l :red true)))
+    (is (= 1.5 (facts/volatile-acidity-ceiling-g-per-l :other true))))
+  (is (nil? (facts/volatile-acidity-ceiling-g-per-l :chartreuse))))
+
+(deftest every-style-va-ceiling-stays-within-the-statutory-maximum
+  ;; The highest figure 4.21 permits at all is 1.7 g/L (red, unameliorated 28+
+  ;; Brix). No configured style may exceed that.
+  (let [ceiling (facts/volatile-acidity-ceiling-g-per-l :red true)]
+    (doseq [[id pt] facts/product-types]
+      (is (<= (:volatile-acidity-max-g-per-l pt) ceiling)
+          (str id " VA ceiling must not exceed the statutory maximum")))))
+
+(deftest so2-figure-is-attributed-to-the-section-that-states-it
+  (let [so2 (:total-so2 facts/us-regulatory-limits)]
+    (is (= 350.0 (:max-ppm so2)))
+    (is (= "27 CFR 4.22(b)(1)" (:section so2))
+        "the figure is in 4.22; 24.246 only delegates to it")
+    (is (= "27 CFR 24.246" (:delegated-from so2))))
+  (testing "every style stays under the federal ceiling"
+    (doseq [[id pt] facts/product-types]
+      (is (<= (:so2-max-ppm pt) 350) (str id " must stay under 350 ppm")))))
+
+(deftest vintage-rule-is-appellation-dependent-not-a-flat-85
+  (testing "4.27(a): 95% for a viticultural area, 85% otherwise"
+    (is (= 95 (facts/vintage-minimum-percent :viticultural-area)))
+    (is (= 85 (facts/vintage-minimum-percent :other-appellation)))
+    (is (nil? (facts/vintage-minimum-percent :unknown))
+        "an unrecognised appellation must not default to the permissive value"))
+
+  (testing "the catalog's flat 85 is permissive for AVA wine, and says so"
+    (doseq [id (keys facts/product-types)]
+      (is (false? (facts/style-vintage-minimum-meets-ava-rule? id))
+          (str id " carries 85, which does not meet the 95% AVA rule")))
+    (is (= [] (:styles-meeting-ava-vintage-rule (facts/citation-coverage))))))
+
+(deftest fill-standards-are-sizes-not-a-tolerance
+  (let [f (:standards-of-fill facts/us-regulatory-limits)]
+    (is (some #{750} (:authorized-ml f)))
+    (is (false? (:tolerance-band-defined? f))
+        "4.72 authorizes discrete sizes; the tolerance is this actor's own")))
+
+(deftest citation-coverage-reports-eu-as-uncited
+  (let [c (facts/citation-coverage)]
+    (is (true? (:us-cited? c)))
+    (is (false? (:eu-figures-cited? c))
+        "no EU source was fetched in this pass, so it must not be reported as cited")))
