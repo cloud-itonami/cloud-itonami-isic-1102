@@ -1,0 +1,433 @@
+(ns wineops.render-html
+  "Build-time HTML renderer for `docs/samples/operator-console.html`.
+
+  Closes flagship checklist item 2 (com-junkawasaki/root ADR-2607189300,
+  Wave3): this repo previously had NO operator-console demo generator —
+  only a product-face `docs/index.html` (DADS marketing surface), which
+  is NOT a governor-driven demo. This namespace drives the REAL
+  `wineops.governor/check` + pure `wineops.store` mutations through a
+  scenario built from this repo's own governor-test batch shapes and
+  renders the result deterministically — no invented numbers, no
+  timestamps in the page content, byte-identical across reruns against
+  the same seed (verify by diffing two consecutive runs).
+
+  Architectural note (honest, not papered over): this vertical is the
+  older `run-operation` / direct-`governor/check` shape (template edn
+  §\"~26 run-operation repos\"), NOT the 290-repo langgraph StateGraph
+  cluster. There is no `op/build` / `g/run*` here — `wineops.operation`
+  is a pure govern-only half and `wineops.advisor` is still a docstring
+  skeleton. REAL means every cell traces to a real `governor/check`
+  verdict and/or a real `store` mutation after the scenario ran, not
+  that a StateGraph was present. Extending this to a full langgraph
+  OperationActor (sugarops/cerealops shape) is a separate maturity step.
+
+  Usage: `clojure -M:dev:render-html [out-file]`
+  (default `docs/samples/operator-console.html`)."
+  (:require [jp-go-dds.skin]
+            [clojure.string :as str]
+            [wineops.governor :as governor]
+            [wineops.store :as store]))
+
+;; ----------------------------- seed (field shapes from
+;; wineops.governor-test / wineops.operation-test clean-batch fixture) ---
+
+(def ^:private us-evidence
+  "Exact keyword set required by `facts/jurisdictions` `:us/ttb`
+  `:required-evidence` — ground truth from facts.cljc, not invented."
+  [:grape-intake-record :fermentation-log :abv-test
+   :residual-sugar-test :volatile-acidity-test :so2-residue-test
+   :allergen-declaration :fill-volume-check])
+
+(defn- ten-days-ago-ms
+  "Calibration date recent enough that
+  `registry/bottling-line-calibration-overdue?` is false at build time.
+  Relative to wall clock (same pattern as governor_test fixtures) — the
+  rendered HTML never prints this value, so page content stays
+  deterministic across reruns."
+  []
+  (- (System/currentTimeMillis) (* 10 24 60 60 1000)))
+
+(defn- clean-batch
+  "Fully TTB-compliant still-table-wine batch. SO2=50ppm is above the
+  10ppm sulfite-declaration threshold, so :sulfites must be declared
+  (see governor_test/clean-batch docstring)."
+  []
+  {:product-type :wine/still-table
+   :jurisdiction :us/ttb
+   :abv-percent 12.5
+   :residual-sugar-g-per-l 2.0
+   :volatile-acidity-g-per-l 0.6
+   :so2-ppm 50
+   :vintage-percent 90
+   :fill-volume-variance-ml 5
+   :contamination-detected? false
+   :bottling-line-last-calibration-date (ten-days-ago-ms)
+   :sanitation-score 85
+   :declared-allergens #{:sulfites}
+   :evidence-checklist us-evidence
+   :safety-concern-raised? false})
+
+(defn- demo-batches
+  "Seed directory. Every field is one this governor actually reads."
+  []
+  {"batch-1" (clean-batch)
+   "batch-abv" (assoc (clean-batch) :abv-percent 15.0)
+   "batch-so2" (assoc (clean-batch) :so2-ppm 200)
+   "batch-contam" (assoc (clean-batch) :contamination-detected? true)
+   "batch-safety" (assoc (clean-batch)
+                         :safety-concern-raised? true
+                         :safety-concern-resolved? false)
+   "batch-evidence" (assoc (clean-batch)
+                           :evidence-checklist
+                           [:grape-intake-record :fermentation-log])})
+
+(def ^:private operator
+  {:actor-id "op-1" :actor-role :winery-operations-coordinator})
+
+(defn- clean-proposal
+  [op]
+  {:cites [{:spec (case op
+                    :log-production-batch "27 CFR 4.1"
+                    :schedule-maintenance "Equipment-Manual"
+                    :flag-food-safety-concern "Winery-HACCP-Plan"
+                    :coordinate-shipment "Shipment-Manual"
+                    "27 CFR 4")}]
+   :value {:jurisdiction :us/ttb}
+   :effect :propose
+   :confidence 0.9
+   :summary (str "demo " (name op))})
+
+(defn- apply-commit-side-effects
+  "Durable batch-lifecycle effects that a real commit would apply
+  (mirrors sugarops.operation/apply-commit-side-effects! using this
+  repo's pure store surface)."
+  [st op subject]
+  (case op
+    :log-production-batch
+    (if-let [b (store/production-batch st subject)]
+      (store/log-batch st subject b)
+      st)
+
+    :coordinate-shipment
+    (store/finalize-shipment st subject)
+
+    st))
+
+(defn- propose!
+  "Drive one request through the REAL `governor/check`. On hard hold,
+  write `governor/hold-fact` to the audit ledger. On escalate, write
+  `:approval-requested`, apply real store side-effects after a simulated
+  human sign-off, then write `:approval-granted`. On ok (auto-commit
+  path — only `:schedule-maintenance` when clean), apply side-effects +
+  `:committed`. Returns a map describing the real outcome — no field
+  invented."
+  [!st request proposal]
+  (let [st @!st
+        verdict (governor/check request operator proposal st)
+        subject (:subject request)
+        op (:op request)]
+    (cond
+      (:hard? verdict)
+      (do (swap! !st store/append-fact
+                 (governor/hold-fact request operator verdict))
+          {:outcome :hard-hold :verdict verdict :subject subject :op op})
+
+      (:escalate? verdict)
+      (do (swap! !st store/append-fact
+                 {:t :approval-requested
+                  :op op
+                  :actor (:actor-id operator)
+                  :subject subject
+                  :disposition :escalate
+                  :basis (if (:high-stakes? verdict)
+                           [:always-escalate]
+                           [:low-confidence])
+                  :confidence (:confidence verdict)})
+          (swap! !st
+                 (fn [s]
+                   (-> s
+                       (apply-commit-side-effects op subject)
+                       (store/append-fact
+                        {:t :approval-granted
+                         :op op
+                         :actor "op-1"
+                         :subject subject
+                         :disposition :commit
+                         :basis (or (:cites proposal) [])}))))
+          {:outcome :approved-and-committed :verdict verdict
+           :subject subject :op op})
+
+      (:ok? verdict)
+      (do (swap! !st
+                 (fn [s]
+                   (-> s
+                       (apply-commit-side-effects op subject)
+                       (store/append-fact
+                        {:t :committed
+                         :op op
+                         :actor (:actor-id operator)
+                         :subject subject
+                         :disposition :commit
+                         :basis (or (:cites proposal) [])}))))
+          {:outcome :auto-committed :verdict verdict
+           :subject subject :op op})
+
+      :else
+      (do (swap! !st store/append-fact
+                 (governor/hold-fact request operator verdict))
+          {:outcome :hold :verdict verdict :subject subject :op op}))))
+
+(defn run-demo!
+  "Runs a freshly seeded plain-map store through a scenario mixing every
+  disposition this actor's governor can actually reach via
+  `governor/check` + pure `store` mutations:
+
+  Clean / escalate paths (batch-1, fully TTB-compliant seed):
+    - `:schedule-maintenance` is NOT always-escalate → auto-commits when
+      clean & high confidence (the only auto-commit-eligible op in this
+      vertical — see governor/always-escalate-ops).
+    - `:log-production-batch` is high-stakes → ALWAYS escalates when clean
+      → human approves → `:processed?` true via store/log-batch.
+    - `:flag-food-safety-concern` ALWAYS escalates → human approves.
+    - `:coordinate-shipment` is high-stakes → escalates → human approves
+      → `:shipment-finalized?` true via store/finalize-shipment.
+
+  HARD-hold paths (never reach a human — each a DISTINCT real rule from
+  `wineops.governor`):
+    - batch-ghost schedule → `:batch-not-registered`
+    - batch-abv log → `:abv-out-of-tolerance`
+    - batch-so2 log → `:so2-residue-exceeded`
+    - batch-contam log → `:contamination-detected`
+    - batch-safety log → `:food-safety-flag-unresolved`
+    - batch-evidence log → `:evidence-incomplete`
+    - batch-1 re-log after commit → `:already-processed`
+    - batch-1 re-ship after finalize → `:already-shipment-finalized`
+    - control-fermentation-line → `:op-not-allowed` (permanent equipment block)
+    - schedule-maintenance with `:effect :commit` → `:effect-not-propose`
+
+  Returns the resulting store — every field `render` reads is real
+  governor/store output."
+  []
+  (let [!st (atom {:batches (demo-batches) :facts []})]
+    ;; --- clean lifecycle on batch-1 ---
+    (propose! !st
+              {:op :schedule-maintenance :subject "batch-1"}
+              (clean-proposal :schedule-maintenance))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-1"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :flag-food-safety-concern :subject "batch-1"}
+              (clean-proposal :flag-food-safety-concern))
+
+    (propose! !st
+              {:op :coordinate-shipment :subject "batch-1"}
+              (clean-proposal :coordinate-shipment))
+
+    ;; --- HARD holds: distinct real governor rules ---
+    (propose! !st
+              {:op :schedule-maintenance :subject "batch-ghost"}
+              (clean-proposal :schedule-maintenance))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-abv"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-so2"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-contam"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-safety"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-evidence"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :log-production-batch :subject "batch-1"}
+              (clean-proposal :log-production-batch))
+
+    (propose! !st
+              {:op :coordinate-shipment :subject "batch-1"}
+              (clean-proposal :coordinate-shipment))
+
+    (propose! !st
+              {:op :control-fermentation-line :subject "batch-1"}
+              {:cites [{:spec "Fermentation-Tank-Manual"}]
+               :value {:jurisdiction :us/ttb}
+               :effect :propose
+               :confidence 0.99
+               :summary "out-of-scope fermentation-line control"})
+
+    (propose! !st
+              {:op :schedule-maintenance :subject "batch-1"}
+              {:cites [{:spec "Equipment-Manual"}]
+               :value {:jurisdiction :us/ttb}
+               :effect :commit
+               :confidence 0.9
+               :summary "illegal non-propose effect"})
+    @!st))
+
+;; ----------------------------- rendering -----------------------------
+
+(defn- esc [v]
+  (-> (str v)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(defn- decision-facts
+  "Only governor/decision facts used for status cells."
+  [ledger]
+  (filter (comp #{:committed :approval-granted :approval-requested
+                  :governor-hold}
+                :t)
+          ledger))
+
+(defn- last-fact-for [ledger subject-id]
+  (last (filter #(= (:subject %) subject-id) (decision-facts ledger))))
+
+(defn- status-cell [ledger subject-id]
+  (let [f (last-fact-for ledger subject-id)]
+    (cond
+      (nil? f) "<span class=\"muted\">no activity</span>"
+      (= :committed (:t f)) "<span class=\"ok\">committed</span>"
+      (= :approval-granted (:t f)) "<span class=\"ok\">approved &amp; committed</span>"
+      (= :governor-hold (:t f))
+      (let [rule (or (-> f :basis first)
+                     (-> f :violations first :rule))]
+        (str "<span class=\"critical\">HARD hold &middot; "
+             (esc (name (or rule :unknown))) "</span>"))
+      (= :approval-requested (:t f)) "<span class=\"warn\">awaiting approval</span>"
+      :else "<span class=\"muted\">in progress</span>")))
+
+(defn- batch-row [ledger [id b]]
+  (let [{:keys [product-type jurisdiction abv-percent so2-ppm
+                vintage-percent contamination-detected?
+                sanitation-score processed? shipment-finalized?
+                safety-concern-raised? safety-concern-resolved?
+                evidence-checklist]} b]
+    (format "        <tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+            (esc id)
+            (esc (name (or product-type :n-a)))
+            (esc (name (or jurisdiction :n-a)))
+            (esc (or abv-percent "—"))
+            (esc (or so2-ppm "—"))
+            (esc (or vintage-percent "—"))
+            (esc (count evidence-checklist))
+            (if processed?
+              "<span class=\"ok\">yes</span>"
+              "<span class=\"muted\">no</span>")
+            (if shipment-finalized?
+              "<span class=\"ok\">yes</span>"
+              "<span class=\"muted\">no</span>")
+            (cond
+              (and safety-concern-raised? (not safety-concern-resolved?))
+              "<span class=\"critical\">open</span>"
+              safety-concern-raised?
+              "<span class=\"ok\">resolved</span>"
+              contamination-detected?
+              "<span class=\"critical\">contam</span>"
+              :else "<span class=\"muted\">none</span>")
+            (status-cell ledger id))))
+
+(defn- basis-cell [basis violations disposition]
+  (or (some->> basis
+               (map (fn [b]
+                      (cond
+                        (keyword? b) (name b)
+                        (map? b) (or (:spec b) (pr-str b))
+                        :else (str b))))
+               (str/join ", "))
+      (some->> violations (map :rule) (map name) (str/join ", "))
+      (some-> disposition name)
+      ""))
+
+(defn- ledger-row [{:keys [t op subject disposition basis violations]}]
+  (format "        <tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>"
+          (esc (name (or t :n-a)))
+          (esc (name (or op :n-a)))
+          (esc (or subject ""))
+          (esc (basis-cell basis violations disposition))))
+
+(def ^:private action-gate-rows
+  ;; Static description of this actor's own closed op contract
+  ;; (README Operations / wineops.governor) — documentation of fixed
+  ;; behavior, not runtime telemetry.
+  ["        <tr><td><code>:log-production-batch</code></td><td><span class=\"warn\">ALWAYS human approval when clean (high-stakes) &middot; HARD hold on ABV/RS/VA/SO2/vintage/contam/calibration/fill/sulfite/sanitation/evidence/already-processed</span></td></tr>"
+   "        <tr><td><code>:schedule-maintenance</code></td><td><span class=\"ok\">auto-commit when clean &amp; confidence ≥ floor (only non-always-escalate allowlisted op)</span></td></tr>"
+   "        <tr><td><code>:flag-food-safety-concern</code></td><td><span class=\"warn\">ALWAYS human approval · never auto-resolved by advisor confidence</span></td></tr>"
+   "        <tr><td><code>:coordinate-shipment</code></td><td><span class=\"warn\">ALWAYS human approval when clean (high-stakes) &middot; HARD hold on :already-shipment-finalized / :batch-not-registered</span></td></tr>"
+   "        <tr><td>fermentation/bottling-line control · excise/tax reclassification</td><td><span class=\"critical\">HARD hold permanent · :op-not-allowed · never overridable</span></td></tr>"
+   "        <tr><td>effect not <code>:propose</code></td><td><span class=\"critical\">HARD hold permanent · :effect-not-propose</span></td></tr>"])
+
+(defn render
+  "Renders the full operator-console.html document from a store `db`
+  that has already run `run-demo!` (or any other real scenario)."
+  [db]
+  (let [ledger (vec (store/audit-trail db))
+        batches (sort-by first (:batches db))
+        batch-rows (str/join "\n" (map (partial batch-row ledger) batches))
+        ledger-rows (str/join "\n" (map ledger-row ledger))]
+    (str
+     "<html><head><meta charset=\"utf-8\"><title>cloud-itonami-isic-1102 &middot; wine manufacturing ops</title><style>"
+     (jp-go-dds.skin/dds+skin)
+     "</style></head><body>\n"
+     "<header class=\"bar\">\n"
+     "  <h1>Wine manufacturing coordination (ISIC 1102) — Operator Console</h1>\n"
+     "  <span class=\"badge\">read-only sample · governor-gated · fermentation/bottling-line control permanently out of scope · food-safety &amp; shipment always human-approved</span>\n"
+     "</header>\n"
+     "<main>\n"
+     "  <section class=\"card\">\n"
+     "    <h2>Production batches</h2>\n"
+     "    <p class=\"muted\">Demo snapshot — build-time-generated from <code>wineops.store</code> via <code>wineops.render-html</code> (<code>clojure -M:dev:render-html</code>), regenerated from the real <code>wineops.governor/check</code>. ABV / SO2 / evidence / processed columns are store ground truth the governor independently re-derives — never trusted from a proposal's own report.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Batch</th><th>Product</th><th>Jurisdiction</th><th>ABV%</th><th>SO2 ppm</th><th>Vintage%</th><th>Evidence</th><th>Logged</th><th>Shipped</th><th>Safety flag</th><th>Last decision</th></tr></thead>\n"
+     "      <tbody>\n"
+     batch-rows "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+     "  <section class=\"card\">\n"
+     "    <h2>Action gate (Wine Governor)</h2>\n"
+     "    <p class=\"muted\">HARD holds cannot be overridden by any human approval. Confidence floor <code>"
+     governor/confidence-floor
+     "</code>. Direct fermentation/bottling-line equipment operation and excise/tax-classification-authority decisions are permanently out of scope for this actor.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Op / condition</th><th>Gate</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" action-gate-rows) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+     "  <section class=\"card\">\n"
+     "    <h2>Audit ledger (this run)</h2>\n"
+     "    <p class=\"muted\">Append-only decision-fact log — every proposal, hold, approval and commit this scenario produced from real <code>governor/check</code> verdicts.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Fact</th><th>Op</th><th>Subject</th><th>Basis</th></tr></thead>\n"
+     "      <tbody>\n"
+     ledger-rows "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+     "</main>\n"
+     "</body></html>\n")))
+
+(defn -main [& args]
+  (let [out (or (first args) "docs/samples/operator-console.html")
+        db (run-demo!)
+        html (render db)
+        out-file (java.io.File. ^String out)]
+    (when-let [parent (.getParentFile out-file)]
+      (.mkdirs parent))
+    (spit out-file html)
+    (println "wrote" out "(" (count (store/audit-trail db)) "ledger facts,"
+             (count (:batches db)) "batches )")))
