@@ -1,12 +1,35 @@
 {:paths ["src"]
- :deps {}
+ :deps {;; Digital Agency design system skin for build-time operator-console
+        ;; (flagship checklist item 2 / Wave3). html/css pinned at top-level
+        ;; so tools.deps can resolve against jp-go-dds's git-coordinate
+        ;; transitive deps (same shape as isic-1200/tobaccomfg).
+        io.github.kotoba-lang/jp-go-digital-design-system
+        {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system"
+         :git/sha "cc8f4849af5def7ea535fd6c0b8a623ccca645e9"}
+        io.github.kotoba-lang/html
+        {:git/url "https://github.com/kotoba-lang/html"
+         :git/sha "aa57f2730c87b7c2752151ed1a5f2e402c2ac71e"}
+        io.github.kotoba-lang/css
+        {:git/url "https://github.com/kotoba-lang/css"
+         :git/sha "6eda5ee28ec177b9e09fdbee92c55a050b18cf7d"}}
  :aliases
- {:dev {:override-deps
-        {io.github.kotoba-lang/langchain
+ {;; monorepo-internal dev -- pin DADS (+ optional langgraph) to local checkouts
+  :dev {:override-deps
+        {io.github.kotoba-lang/jp-go-digital-design-system
+         {:local/root "../../kotoba-lang/jp-go-digital-design-system"}
+         io.github.kotoba-lang/html
+         {:local/root "../../kotoba-lang/html"}
+         io.github.kotoba-lang/css
+         {:local/root "../../kotoba-lang/css"}
+         io.github.kotoba-lang/langchain
          {:local/root "../../kotoba-lang/langchain"}
-        io.github.kotoba-lang/langgraph
-        {:local/root "../../kotoba-lang/langgraph"}}}
+         io.github.kotoba-lang/langgraph
+         {:local/root "../../kotoba-lang/langgraph"}}}
   :run {:main-opts ["-m" "wineops.sim"]}
+  ;; clojure -M:dev:render-html [out-file] -> regenerate
+  ;; docs/samples/operator-console.html through the real governor/store
+  ;; (flagship checklist item 2, ADR-2607189300 Wave3).
+  :render-html {:main-opts ["-m" "wineops.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
