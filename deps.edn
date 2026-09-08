@@ -1,5 +1,10 @@
 {:paths ["src"]
- :deps {;; Digital Agency design system skin for build-time operator-console
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       ;; Digital Agency design system skin for build-time operator-console
         ;; (flagship checklist item 2 / Wave3). html/css pinned at top-level
         ;; so tools.deps can resolve against jp-go-dds's git-coordinate
         ;; transitive deps (same shape as isic-1200/tobaccomfg).
