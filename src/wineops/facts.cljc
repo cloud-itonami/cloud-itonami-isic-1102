@@ -7,7 +7,7 @@
   calls these to independently validate proposals; the advisor's
   confidence is never sufficient on its own."
   (:require [clojure.set :as set]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (def product-types
   "Valid wine product categories and their safe production windows.
