@@ -1,5 +1,5 @@
 (ns wineops.store-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [wineops.store :as store]))
 
 ;; ──────────────────────── Batch Retrieval ──────────────────────
