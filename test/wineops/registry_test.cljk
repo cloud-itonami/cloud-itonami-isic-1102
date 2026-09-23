@@ -1,5 +1,5 @@
 (ns wineops.registry-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [wineops.registry :as registry]))
 
 ;; ──────────────────────── ABV Tolerance ──────────────────────

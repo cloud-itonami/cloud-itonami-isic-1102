@@ -1,5 +1,5 @@
 (ns wineops.phase-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [wineops.phase :as phase]))
 
 ;; ──────────────────────── Phase Validity ──────────────────────
