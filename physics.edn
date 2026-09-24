@@ -1,0 +1,29 @@
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isic-1102"
+ :cases
+ [{:id :racking-transfer
+   :kind :pipe-flow
+   :procedure "impeller pump racks young wine off the lees from the fermenter to a clean tank through a 50 mm hose"
+   :params {:diameter-m 0.05 :length-m 40.0 :roughness-m 1.5e-6
+            :density-kg-m3 990.0 :viscosity-pa-s 1.8e-3 :pump-efficiency 0.5 :elevation-m 3.0}
+   :sweep {:param :q-m3s :values [0.002 0.004 0.006 0.008 0.010]}
+   :quantity :pressure-drop-pa
+   :limit {:max 2.0e5 :basis "estimate: ~2 bar discharge of a gentle flexible-impeller wine pump"}
+   :boundary {:lo 5.0e-4 :hi 0.03}}
+  {:id :fermenter-drain
+   :kind :tank-drain
+   :procedure "robot opens the racking valve of a 10 m3 fermenter by gravity to the tank below"
+   :params {:tank-area-m2 3.14 :h0-m 3.2 :h-target-m 0.2 :cd 0.62 :dt-s 1.0}
+   :sweep {:param :orifice-area-m2 :values [5.0e-4 1.0e-3 2.0e-3 3.0e-3 4.0e-3]}
+   :quantity :time-to-target-s
+   :limit {:max 3600.0 :basis "estimate: gravity racking of one fermenter within a 1 h cellar slot"}
+   :boundary {:lo 1.0e-4 :hi 0.01}}
+  {:id :wine-case-lift
+   :kind :manipulator
+   :procedure "arm lifts a filled wine case from the case packer onto the pallet"
+   :params {:l1-m 0.60 :l2-m 0.55 :m1-kg 8.0 :m2-kg 6.0
+            :from [0.70 0.0] :to [0.25 0.60] :duration-s 2.0 :steps 400}
+   :sweep {:param :payload-kg :values [6.0 9.0 12.0 16.0 20.0]}
+   :quantity :peak-tau1-nm
+   :limit {:max 200.0 :basis "estimate: continuous shoulder torque of a ~20 kg payload palletizing arm"}
+   :boundary {:lo 1.0 :hi 80.0}}]}
